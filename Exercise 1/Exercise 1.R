@@ -1,0 +1,100 @@
+df = read.csv("/Users/lauray/Documents/GitHub/2024-ona-assignments/Exercise 1/Connections_Xinran.csv", skip=3)
+attach(df)
+
+library(ggplot2)
+company_counts <- table(df$Company)
+company_df <- as.data.frame(company_counts, stringsAsFactors=FALSE)
+names(company_df) <- c("Company", "Connections")
+top_companies <- head(company_df[order(-company_df$Connections),], 10)
+top_companies
+
+# Plot the bar chart
+ggplot(top_companies, aes(x = reorder(Company, Connections), y = Connections)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  theme_minimal() +
+  labs(title = "Top 10 Companies by Number of Connections", x = "Company", y = "Number of Connections") +
+  coord_flip() 
+
+nrow(df)
+
+library(dplyr)
+df = df %>%
+  mutate(Full.Name = paste(First.Name, substr(Last.Name, 1, 1), sep = " "))
+
+employer_counts = df %>%
+  group_by(Company) %>%
+  summarize(Count = n())
+nrow(df)
+
+library(tidygraph)
+graph_routes = as_tbl_graph(employer_counts)
+
+graph_routes
+
+nodes = df %>% distinct(Full.Name)
+library(tibble)
+nodes = rowid_to_column(nodes, "id")
+nodes
+
+library(purrr)
+library(tidyr)
+edges <- df %>%
+  group_by(Company) %>%
+  filter(n() > 1) %>% 
+  summarise(Pairs = list(combn(Full.Name, 2, simplify = FALSE)), .groups = 'drop') %>%
+  unnest(Pairs) %>%
+  transmute(from = map_chr(Pairs, 1), to = map_chr(Pairs, 2))
+
+edges <- edges %>%
+  left_join(nodes, by = c("from" = "Full.Name")) %>%
+  left_join(nodes, by = c("to" = "Full.Name")) %>%
+  select(from = id.x, to = id.y)
+
+
+library(tidygraph)
+library(ggraph)
+
+routes_tidy <- tbl_graph(nodes = nodes, edges = edges, directed = TRUE)
+
+library(tidygraph)
+routes_tidy <- routes_tidy %>% 
+  mutate(degree = centrality_degree(mode = 'all'))
+
+# Plot the graph
+library(ggrepel)
+ggraph(routes_tidy, layout = "stress") +
+  geom_node_point(size = 3, aes(color = degree), alpha = 0.6) +
+  geom_edge_link(aes(width = 0.005), alpha = 0.07, color = 'grey') +
+  geom_node_text(aes(label = Full.Name),
+                 repel = TRUE,
+                 size = 3,
+                 color = "grey",
+                 max.overlaps = Inf) + 
+  scale_color_gradient(low = "blue", high = "red") +
+  theme_void() +
+  labs(color = "Degree")
+
+library(ggraph)
+library(tidygraph)
+
+routes_tidy_filtered <- routes_tidy %>%
+  filter(degree > 0)
+
+ggraph(routes_tidy_filtered, layout = "kk") +
+  geom_node_point(size = 3, aes(color = as.factor(degree)), alpha = 0.6) +  
+  geom_edge_link(aes(width = 0.005), alpha = 0.07, color = 'grey') + 
+  geom_node_text(aes(label = Full.Name), repel = TRUE, 
+                 size = 3, family = "sans", color = "black", max.overlaps = Inf) +
+  scale_color_brewer(type = 'qual', palette = "Set1") + 
+  theme_void()
+
+
+ggraph(routes_tidy_filtered, layout = "fr") +
+  geom_node_point(size = 3, aes(color = as.factor(degree)), alpha = 0.6) +  
+  geom_edge_link(aes(width = 0.05), alpha = 0.5, color = 'grey') + 
+  geom_node_text(aes(label = Full.Name), repel = TRUE, 
+                 size = 3, family = "sans", color = "black", max.overlaps = Inf) +
+  scale_color_brewer(type = 'qual', palette = "Set1") + 
+  theme_void()
+
+
