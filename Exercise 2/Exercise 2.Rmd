@@ -1,0 +1,72 @@
+---
+title: "Exercise 2"
+output:
+  pdf_document: default
+date: "2024-03-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load necessary librariesyes
+library(dplyr)
+library(igraph)
+library(tidygraph)
+library(visNetwork)
+```
+
+```{r}
+# Read the dataset
+df = read.csv("/Users/lauray/Documents/GitHub/2024-ona-assignments/Exercise 2/FACEBOOK.csv")
+```
+
+```{r}
+# create the graph
+graph = graph_from_data_frame(df, directed = TRUE)
+```
+
+```{r}
+degree_centrality <- degree(graph, mode = "all")
+closeness_centrality <- closeness(graph, mode = "all")
+betweenness_centrality <- betweenness(graph, directed = FALSE)
+```
+
+```{r}
+# Use these variables correctly in the labeling
+labels <- paste(V(graph)$name, 
+                "\nD:", round(degree_centrality, 2), 
+                "\nC:", round(closeness_centrality, 2), 
+                "\nB:", round(betweenness_centrality, 2))
+
+# Use one of the layouts in the plot
+plot(graph, vertex.label = labels)
+```
+
+
+```{r}
+visNetwork::visIgraph(graph) %>%
+  visNetwork::visLayout(randomSeed = 123) 
+
+```
+
+```{r}
+edges_data <- get.data.frame(graph, what = "edges")
+
+nodes_data <- data.frame(
+  id = V(graph)$name,
+  label = paste(V(graph)$name, 
+                "\nD:", round(degree_centrality, 2), 
+                "\nC:", round(closeness_centrality, 2), 
+                "\nB:", round(betweenness_centrality, 2), sep=" "),
+  value = degree_centrality
+)
+
+visNetwork(nodes_data, edges_data) %>%
+  visNodes(shape = 'dot', size = 10) %>%
+  visEdges(arrows = 'to') %>%
+  visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE) %>%
+  visLayout(randomSeed = 123) 
+
+```
