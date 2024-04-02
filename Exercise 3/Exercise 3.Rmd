@@ -1,0 +1,618 @@
+---
+title: "Exercise 3"
+output:
+  pdf_document
+date: "2024-03-28"
+---
+
+The first few sections of this markdown document reiterates the processing steps highlighted in Exercise 2 with some improvments to the code. For details on Exercise 3, skip to page 8 for the regression analysis.
+
+# Initialisation of libraries and dataset
+
+## Import Libraries
+```{r Setup}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60), format='latex', echo=TRUE)
+library(tidyverse)
+library(lubridate)
+library(arrow)
+```
+
+## Import Dataset
+
+```{r Import Dataset}
+data_path = "/Users/lauray/Documents/GitHub/2024-ona-assignments/Exercise 3/672_project_data/app_data_sample.parquet" # change this to your path
+applications = arrow::read_parquet(data_path)
+```
+
+# Processing of dataset to include gender and race for examiners
+
+## Adding gender.y to dataset based on surnames library
+```{r Gender-related processing}
+library(gender)
+
+# get a list of first names without repetitions
+examiner_names = applications %>% 
+  distinct(examiner_name_first)
+
+
+examiner_names_gender = examiner_names %>% 
+  do(results = gender(.$examiner_name_first, method = "ssa")) %>% 
+  unnest(cols = c(results), keep_empty = TRUE) %>% 
+  select(
+    examiner_name_first = name,
+    gender,
+    proportion_female
+  )
+
+examiner_names_gender
+
+
+
+gc()
+```
+
+```{r Gender}
+
+# remove extra colums from the gender table
+examiner_names_gender = examiner_names_gender %>% 
+  select(examiner_name_first, gender)
+
+# joining gender back to the dataset
+applications = applications %>% 
+  left_join(examiner_names_gender, by = "examiner_name_first")
+
+# cleaning up
+rm(examiner_names)
+rm(examiner_names_gender)
+gc()
+```
+
+
+
+## Adding race.y to dataset using surnames library
+```{r Race-related processing}
+library(wru)
+
+examiner_surnames = applications %>% 
+  select(surname = examiner_name_last) %>% 
+  distinct()
+
+
+examiner_race = predict_race(voter.file = examiner_surnames, surname.only = T) %>% 
+  as_tibble()
+
+examiner_race = examiner_race %>% 
+  mutate(max_race_p = pmax(pred.asi, pred.bla, pred.his, pred.oth, pred.whi)) %>% 
+  mutate(race = case_when(
+    max_race_p == pred.asi ~ "Asian",
+    max_race_p == pred.bla ~ "black",
+    max_race_p == pred.his ~ "Hispanic",
+    max_race_p == pred.oth ~ "other",
+    max_race_p == pred.whi ~ "white",
+    TRUE ~ NA_character_
+  ))
+
+
+examiner_race = examiner_race %>% 
+  select(surname,race)
+
+applications = applications %>% 
+  left_join(examiner_race, by = c("examiner_name_last" = "surname"))
+
+rm(examiner_race)
+rm(examiner_surnames)
+gc()
+```
+## Adding dates-related data to calculate tenure days 
+```{r Dates-related processing}
+library(lubridate) # to work with dates
+
+examiner_dates = applications %>% 
+  select(examiner_id, filing_date, appl_status_date) 
+examiner_dates = examiner_dates %>% 
+  mutate(start_date = ymd(filing_date), end_date = as_date(dmy_hms(appl_status_date)))
+
+examiner_dates = examiner_dates %>% 
+  group_by(examiner_id) %>% 
+  summarise(
+    earliest_date = min(start_date, na.rm = TRUE), 
+    latest_date = max(end_date, na.rm = TRUE),
+    tenure_days = interval(earliest_date, latest_date) %/% days(1)
+    ) %>% 
+  filter(year(latest_date)<2018)
+applications = applications %>% 
+  left_join(examiner_dates, by = "examiner_id")
+
+rm(examiner_dates)
+gc()
+```
+
+# Creating panel data
+
+## Cleaning noisy data
+
+```{r Cleaning noisy data}
+distinct_dataset = applications %>%
+  select(examiner_art_unit, examiner_id, gender, race, tenure_days) %>%
+  distinct()
+distinct_dataset = distinct_dataset %>%
+  mutate(first_three_digits = str_sub(examiner_art_unit, 1, 3))
+
+filtered_df = distinct_dataset %>%
+  filter(str_sub(examiner_art_unit, 1, 3) %in% c("161", "162"))
+
+```
+
+```{r}
+# Summary statistics for tenure
+tenure_summary = filtered_df %>%
+  group_by(workgroup = str_sub(examiner_art_unit, 1, 3)) %>%
+  summarise(
+    count = n(),
+    mean_tenure = mean(tenure_days, na.rm = TRUE),
+    sd_tenure = sd(tenure_days, na.rm = TRUE),
+    min_tenure = min(tenure_days, na.rm = TRUE),
+    max_tenure = max(tenure_days, na.rm = TRUE)
+  )
+
+print(tenure_summary)
+
+# Frequency tables for gender and race
+gender_table = table(filtered_df$first_three_digits, filtered_df$gender)
+race_table = table(filtered_df$first_three_digits, filtered_df$race)
+
+print(gender_table)
+print(race_table)
+```
+```{r}
+library(dplyr)
+library(stringr)
+
+distinct_dataset = distinct_dataset %>%
+  mutate(group = case_when(
+    str_sub(examiner_art_unit, 1, 3) == "161" ~ "161",
+    str_sub(examiner_art_unit, 1, 3) == "162" ~ "162",
+    TRUE ~ "Other"
+  ))
+
+# Proportion of female employees
+female_prop = distinct_dataset %>%
+  group_by(group) %>%
+  summarise(female_count = sum(gender == "female", na.rm = TRUE),
+            total_count = n(),
+            prop_female = female_count / total_count)
+
+# Proportion of white employees
+white_prop = distinct_dataset %>%
+  group_by(group) %>%
+  summarise(white_count = sum(race == "white", na.rm = TRUE),
+            total_count = n(),
+            prop_white = white_count / total_count)
+
+# Proportion of asian employees
+asian_prop = distinct_dataset %>%
+  group_by(group) %>%
+  summarise(asian_count = sum(race == "Asian", na.rm = TRUE),
+            total_count = n(),
+            prop_asian = asian_count / total_count)
+
+# Proportion of white employees
+black_prop = distinct_dataset %>%
+  group_by(group) %>%
+  summarise(black_count = sum(race == "black", na.rm = TRUE),
+            total_count = n(),
+            prop_black = black_count / total_count)
+
+print(female_prop)
+print(white_prop)
+print(asian_prop)
+print(black_prop)
+
+```
+```{r}
+# Create a contingency table for gender
+gender_table = table(distinct_dataset$first_three_digits, distinct_dataset$gender)
+
+# Perform chi-squared test
+gender_chi_sq = chisq.test(gender_table)
+
+# Print the results
+print(gender_chi_sq)
+```
+
+
+```{r}
+# Create a contingency table for race
+race_table = table(distinct_dataset$first_three_digits, distinct_dataset$race)
+
+# Perform chi-squared test
+race_chi_sq = chisq.test(race_table)
+
+# Print the results
+print(race_chi_sq)
+```
+```{r}
+library(ggplot2)
+
+# Boxplot for tenure by workgroup
+ggplot(distinct_dataset, aes(x = group, y = tenure_days, fill = group)) +
+  geom_boxplot() +
+  labs(x = "Workgroup", y = "Tenure", title = "Tenure by Workgroup") +
+  theme_minimal()
+
+distinct_dataset %>%
+  mutate(workgroup = substring(examiner_art_unit, 1, 3)) %>%
+  ggplot(aes(x = tenure_days, fill = workgroup)) +
+  geom_histogram(data = . %>% filter(workgroup == "161"), binwidth = 365, alpha = 0.5) +
+  geom_histogram(data = . %>% filter(workgroup == "162"), binwidth = 365, alpha = 0.5) +
+  labs(title = "Tenure Distribution by Workgroup", x = "Tenure (days)", y = "Frequency") +
+  scale_fill_brewer(palette = "Pastel1") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+```
+
+```{r}
+df_prop = distinct_dataset %>%
+  group_by(group) %>%
+  summarise(total_count = n(), # Total employees in each group
+            female_count = sum(gender == "female", na.rm = TRUE)) %>%
+  mutate(proportion_female = female_count / total_count) %>%
+  select(group, proportion_female)
+
+
+ggplot(df_prop, aes(x = group, y = proportion_female, fill = group)) +
+  geom_col() + 
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Group", y = "Proportion of Female Employees", title = "Proportion of Female Employees by Group") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+```
+```{r}
+df_prop = distinct_dataset %>%
+  group_by(group) %>%
+  summarise(
+    total_count = n(),
+    white_count = sum(race == "white", na.rm = TRUE),
+    asian_count = sum(race == "Asian", na.rm = TRUE),
+    black_count = sum(race == "black", na.rm = TRUE)
+  ) %>%
+  mutate(
+    proportion_white = white_count / total_count,
+    proportion_asian = asian_count / total_count,
+    proportion_black = black_count / total_count
+  ) %>%
+  pivot_longer(
+    cols = starts_with("proportion"),
+    names_to = "race",
+    values_to = "proportion"
+  ) %>%
+  mutate(
+    race = factor(race, levels = c("proportion_white", "proportion_asian", "proportion_black"),
+                  labels = c("White", "Asian", "Black"))
+  )
+
+library(ggplot2)
+
+ggplot(df_prop, aes(x = group, y = proportion, fill = race)) +
+  geom_col() +
+  facet_wrap(~ race, scales = "free_y") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Group", y = "Proportion", title = "Proportion of Employees by Race and Group") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+```
+
+```{r}
+edges_sample = read_csv("/Users/lauray/Documents/GitHub/2024-ona-assignments/Exercise 3/672_project_data/edges_sample.csv")
+edges_sample = drop_na(edges_sample)
+edges_sample = select(edges_sample, ego_examiner_id, alter_examiner_id)
+filtered_examiners = distinct_dataset %>%
+  filter(group %in% c("161","162"))
+```
+
+```{r}
+library(igraph)
+library(readr)
+edges_for_network = edges_sample %>%
+  filter(ego_examiner_id %in% filtered_examiners$examiner_id | alter_examiner_id %in% filtered_examiners$examiner_id)
+network = graph_from_data_frame(edges_for_network, directed = TRUE)
+
+
+library(visNetwork)
+visNetwork::visIgraph(network)
+```
+
+```{r}
+edges_sample = read_csv("/Users/lauray/Documents/GitHub/2024-ona-assignments/Exercise 3/672_project_data/edges_sample.csv")
+edges_sample = drop_na(edges_sample)
+edges_sample = select(edges_sample, ego_examiner_id, alter_examiner_id)
+filtered_examiners = distinct_dataset %>%
+  filter(group %in% c("161"))
+filtered_examiners = filtered_examiners %>%
+  mutate(examiner_id = as.character(examiner_id))
+library(igraph)
+library(readr)
+edges_for_network = edges_sample %>%
+  filter(ego_examiner_id %in% filtered_examiners$examiner_id | alter_examiner_id %in% filtered_examiners$examiner_id)
+network_161 = graph_from_data_frame(edges_for_network, directed = TRUE)
+
+
+library(visNetwork)
+visNetwork::visIgraph(network)
+
+```
+```{r}
+# Color nodes by gender
+gender_df = unique(select(applications, examiner_id, gender))
+library(data.table)
+setDT(edges_for_network)
+setDT(gender_df)
+edges_for_network = merge(edges_for_network, gender_df, by.x = "ego_examiner_id", by.y = "examiner_id", all.x = TRUE)
+edges_for_network = merge(edges_for_network, gender_df, by.x = "alter_examiner_id", by.y = "examiner_id", all.x = TRUE, suffixes = c("_ego", "_alter"))
+
+network_161 <- graph_from_data_frame(edges_for_network, directed = TRUE)
+
+gender_vector <- c(setNames(edges_for_network$gender_ego, edges_for_network$ego_examiner_id),
+                   setNames(edges_for_network$gender_alter, edges_for_network$alter_examiner_id))
+
+gender_vector <- gender_vector[!duplicated(names(gender_vector))]
+
+V(network_161)$gender <- gender_vector[V(network_161)$name]
+
+getGenderColor <- function(gender) {
+  ifelse(gender == "male", "lightblue", 
+         ifelse(gender == "female", "pink", "black"))
+}
+
+V(network_161)$color <- sapply(V(network_161)$gender, getGenderColor)
+
+visNetwork::visIgraph(network_161) %>%
+  visNodes(color = list(background = V(network_161)$color))
+```
+```{r}
+race_df = unique(select(applications, examiner_id, race))
+setDT(edges_for_network)
+setDT(race_df)
+edges_for_network = merge(edges_for_network, race_df, by.x = "ego_examiner_id", by.y = "examiner_id", all.x = TRUE)
+edges_for_network = merge(edges_for_network, race_df, by.x = "alter_examiner_id", by.y = "examiner_id", all.x = TRUE, suffixes = c("_ego", "_alter"))
+network_161 <- graph_from_data_frame(edges_for_network, directed = TRUE)
+
+race_vector <- c(setNames(edges_for_network$race_ego, edges_for_network$ego_examiner_id),
+                 setNames(edges_for_network$race_alter, edges_for_network$alter_examiner_id))
+
+race_vector <- race_vector[!duplicated(names(race_vector))]
+
+V(network_161)$race <- race_vector[V(network_161)$name]
+
+race_colors <- c("Asian" = "green", "black" = "red", "Hispanic" = "orange", "white" = "blue", "other" = "purple")
+
+V(network_161)$color <- ifelse(V(network_161)$race %in% names(race_colors), race_colors[V(network_161)$race], "gray")
+
+visNetwork::visIgraph(network_161) %>%
+  visNodes(color = list(background = V(network_161)$color,
+                        border = "#2b2b2b", highlight = "#d9d9d9"))
+
+```
+
+
+```{r}
+edges_sample = read_csv("/Users/lauray/Documents/GitHub/2024-ona-assignments/Exercise 3/672_project_data/edges_sample.csv")
+edges_sample = drop_na(edges_sample)
+edges_sample = select(edges_sample, ego_examiner_id, alter_examiner_id)
+filtered_examiners = distinct_dataset %>%
+  filter(group %in% c("162"))
+library(igraph)
+library(readr)
+edges_for_network = edges_sample %>%
+  filter(ego_examiner_id %in% filtered_examiners$examiner_id | alter_examiner_id %in% filtered_examiners$examiner_id)
+network_162 = graph_from_data_frame(edges_for_network, directed = TRUE)
+
+visNetwork::visIgraph(network)
+```
+
+
+```{r} 
+# Color nodes by gender
+gender_df = unique(select(applications, examiner_id, gender))
+library(data.table)
+setDT(edges_for_network)
+setDT(gender_df)
+edges_for_network = merge(edges_for_network, gender_df, by.x = "ego_examiner_id", by.y = "examiner_id", all.x = TRUE)
+edges_for_network = merge(edges_for_network, gender_df, by.x = "alter_examiner_id", by.y = "examiner_id", all.x = TRUE, suffixes = c("_ego", "_alter"))
+
+network_162 <- graph_from_data_frame(edges_for_network, directed = TRUE)
+
+gender_vector <- c(setNames(edges_for_network$gender_ego, edges_for_network$ego_examiner_id),
+                   setNames(edges_for_network$gender_alter, edges_for_network$alter_examiner_id))
+
+gender_vector <- gender_vector[!duplicated(names(gender_vector))]
+
+V(network_162)$gender <- gender_vector[V(network_162)$name]
+
+getGenderColor <- function(gender) {
+  ifelse(gender == "male", "lightblue", 
+         ifelse(gender == "female", "pink", "black"))
+}
+
+V(network_162)$color <- sapply(V(network_162)$gender, getGenderColor)
+
+visNetwork::visIgraph(network_162) %>%
+  visNodes(color = list(background = V(network_162)$color))
+
+
+```
+
+```{r}
+race_df = unique(select(applications, examiner_id, race))
+setDT(edges_for_network)
+setDT(race_df)
+edges_for_network = merge(edges_for_network, race_df, by.x = "ego_examiner_id", by.y = "examiner_id", all.x = TRUE)
+edges_for_network = merge(edges_for_network, race_df, by.x = "alter_examiner_id", by.y = "examiner_id", all.x = TRUE, suffixes = c("_ego", "_alter"))
+network_162 <- graph_from_data_frame(edges_for_network, directed = TRUE)
+
+# Create a named vector of races with examiner IDs as names
+race_vector <- c(setNames(edges_for_network$race_ego, edges_for_network$ego_examiner_id),
+                 setNames(edges_for_network$race_alter, edges_for_network$alter_examiner_id))
+
+# Remove potential duplicates, keeping the first occurrence
+race_vector <- race_vector[!duplicated(names(race_vector))]
+
+# Assign race to vertices based on the vector created above
+V(network_162)$race <- race_vector[V(network_162)$name]
+
+# Define a color palette for the races, adjust according to your race categories
+race_colors <- c("Asian" = "green", "black" = "red", "Hispanic" = "orange", "white" = "blue", "other" = "purple")
+
+# Assign colors to nodes based on race, default to 'gray' if race is not in the palette
+V(network_162)$color <- ifelse(V(network_162)$race %in% names(race_colors), race_colors[V(network_162)$race], "gray")
+
+# Visualize the network with visNetwork
+visNetwork::visIgraph(network_162) %>%
+  visNodes(color = list(background = V(network_162)$color,
+                        border = "#2b2b2b", highlight = "#d9d9d9"))
+
+```
+
+```{r}
+closeness_centrality = closeness(network_161, mode = "out")
+centrality_scores = data.frame(examiner_id = V(network_161)$name, closeness_centrality = closeness_centrality) %>%
+  mutate(examiner_id = as.numeric(examiner_id))
+final_dataset_161 = distinct_dataset %>%
+  left_join(centrality_scores, by = "examiner_id")
+average_by_gender_161 = final_dataset_161 %>%
+  group_by(gender) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+
+closeness_centrality = closeness(network_162, mode = "out")
+centrality_scores = data.frame(examiner_id = V(network_162)$name, closeness_centrality = closeness_centrality) %>%
+  mutate(examiner_id = as.numeric(examiner_id))
+final_dataset_162 = distinct_dataset %>%
+  left_join(centrality_scores, by = "examiner_id")
+
+average_by_gender_162 = final_dataset_162 %>%
+  group_by(gender) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+
+# Display the table
+print(average_by_gender_161)
+print(average_by_gender_162)
+```
+
+```{r}
+# Calculate average closeness centrality score grouped by race
+average_by_race_161 = final_dataset_161 %>%
+  group_by(race) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+
+average_by_race_162 = final_dataset_162 %>%
+  group_by(race) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+
+
+# Display the table
+print(average_by_race_161)
+print(average_by_race_162)
+```
+```{r}
+library(dplyr)
+
+# Define bins for tenure days. Adjust the breaks as needed for your dataset.
+tenure_bins = c(0, 365, 730, 1095, 1460, Inf) # Example bins: <1 year, 1-2 years, 2-3 years, 3-4 years, >4 years
+labels = c("<1 year", "1-2 years", "2-3 years", "3-4 years", ">4 years") # Labels for the bins
+
+# Create a new column for tenure categories
+final_dataset_161 = final_dataset_161 %>%
+  mutate(tenure_category = cut(tenure_days, breaks = tenure_bins, labels = labels, right = FALSE))
+
+# Calculate average closeness centrality score grouped by tenure category
+average_by_tenure_category_161 = final_dataset_161 %>%
+  group_by(tenure_category) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+
+
+final_dataset_162 = final_dataset_162 %>%
+  mutate(tenure_category = cut(tenure_days, breaks = tenure_bins, labels = labels, right = FALSE))
+
+average_by_tenure_category_162 = final_dataset_162 %>%
+  group_by(tenure_category) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+
+
+# Display the table
+print(average_by_tenure_category_161)
+print(average_by_tenure_category_162)
+```
+
+
+
+```{r}
+library(igraph)
+# Calculate betweenness centrality
+betweenness_161 = betweenness(network_161, directed = TRUE)
+centrality_161 = data.frame(examiner_id = V(network_161)$name, betweenness = betweenness_161)
+
+betweenness_162 = betweenness(network_162, directed = TRUE)
+centrality_162 = data.frame(examiner_id = V(network_162)$name, betweenness = betweenness_162)
+
+centrality_161 = centrality_161 %>% 
+  mutate(examiner_id = as.numeric(examiner_id))
+
+centrality_162 = centrality_162 %>% 
+  mutate(examiner_id = as.numeric(examiner_id))
+
+final_data_161 = distinct_dataset %>%
+  filter(group == "161") %>%
+  left_join(centrality_161, by = "examiner_id")
+
+final_data_162 = distinct_dataset %>%
+  filter(group == "162") %>%
+  left_join(centrality_162, by = "examiner_id")
+
+# Group by gender and calculate average betweenness
+average_betweenness_gender_161 = final_data_161 %>%
+  group_by(gender) %>%
+  summarise(average_betweenness = mean(betweenness, na.rm = TRUE))
+
+average_betweenness_gender_162 = final_data_162 %>%
+  group_by(gender) %>%
+  summarise(average_betweenness = mean(betweenness, na.rm = TRUE))
+
+average_betweenness_race_161 = final_data_161 %>%
+  group_by(race) %>%
+  summarise(average_betweenness = mean(betweenness, na.rm = TRUE))
+
+average_betweenness_race_162 = final_data_162 %>%
+  group_by(race) %>%
+  summarise(average_betweenness = mean(betweenness, na.rm = TRUE))
+
+final_data_161 = final_data_161 %>%
+  mutate(tenure_category = cut(tenure_days, breaks = tenure_bins, labels = labels, right = FALSE))
+
+average_betweenness_tenure_161 = final_data_161 %>%
+  group_by(tenure_category) %>%
+  summarise(average_betweenness = mean(betweenness, na.rm = TRUE))
+
+final_data_162 = final_data_162 %>%
+  mutate(tenure_category = cut(tenure_days, breaks = tenure_bins, labels = labels, right = FALSE))
+
+average_betweenness_tenure_162 = final_data_162 %>%
+  group_by(tenure_category) %>%
+  summarise(average_betweenness = mean(betweenness, na.rm = TRUE))
+
+print(average_betweenness_gender_161)
+print(average_betweenness_gender_162)
+print(average_betweenness_race_161)
+print(average_betweenness_race_162)
+print(average_betweenness_tenure_161)
+print(average_betweenness_tenure_162)
+
+```
+
+
+
+
+
+
+
