@@ -1,0 +1,198 @@
+---
+title: "Exercise 4"
+output: pdf_document
+date: "2024-04-05"
+---
+
+## Import Libraries
+```{r Setup}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60), format='latex', echo=TRUE)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(arrow)
+library(igraph)
+```
+
+# Import Dataset
+```{r Import Dataset}
+data_path = "/Users/lauray/Documents/GitHub/2024-ona-assignments/Exercise 3/672_project_data/app_data_sample.parquet"
+applications = arrow::read_parquet(data_path)
+attach(applications)
+```
+
+## Adding gender to dataset 
+```{r Gender-related processing}
+library(gender)
+
+# get a list of first names without repetitions
+examiner_names = applications %>% 
+  distinct(examiner_name_first)
+
+examiner_names_gender = examiner_names %>% 
+  do(results = gender(.$examiner_name_first, method = "ssa")) %>% 
+  unnest(cols = c(results), keep_empty = TRUE) %>% 
+  select(
+    examiner_name_first = name,
+    gender,
+    proportion_female
+  )
+
+examiner_names_gender
+
+gc()
+
+# remove extra colums from the gender table
+examiner_names_gender = examiner_names_gender %>% 
+  select(examiner_name_first, gender)
+
+# joining gender back to the dataset
+applications = applications %>% 
+  left_join(examiner_names_gender, by = "examiner_name_first")
+
+# cleaning up
+rm(examiner_names)
+rm(examiner_names_gender)
+gc()
+```
+# Add the column for Application processing time
+```{r}
+# combine patent issue date & abandon_date as the final decision date
+# decision_date = the earlier of patent_issue_date and abandon_date, ignoring NAs
+applications$decision_date = pmin(applications$patent_issue_date, applications$abandon_date, na.rm = TRUE)
+
+# Cannot get the application processing time when the decision date is missing
+# drop NA in decision_date column
+applications = drop_na(applications,decision_date)
+attach(applications)
+applications = applications %>%
+  mutate(
+    app_proc_time= as.numeric(ymd(decision_date) - ymd(filing_date)) # days
+  )
+
+# Histogram for the application processing days
+ggplot(applications, aes(x = app_proc_time)) +
+  geom_histogram(binwidth = 100, fill = "lightblue") +
+  labs(title = "Histogram of Application Processing Time in Days",
+       x = "Processing Time (days)",
+       y = "Frequency") +
+  theme_minimal()
+
+## Negative values in application processing time
+# Calculate the total number of applications with negative processing times
+neg_decision_date_counts = applications %>%
+  filter(app_proc_time < 0) %>%
+  summarise(total_negative_count = n())
+
+neg_decision_date_counts
+
+# total negative count = 35
+# small portion of the application processing time is negative
+```
+
+
+```{r}
+#Filter out the outliers to have a clearer distribution graph
+# Calculate the IQR
+Q1 = quantile(applications$app_proc_time, 0.25)
+Q3 = quantile(applications$app_proc_time, 0.75)
+IQR = Q3 - Q1
+
+# Define the upper and lower bounds for what is considered an outlier
+upper_bound = Q3 + 1.5 * IQR
+lower_bound = Q1 - 1.5 * IQR
+
+# Filter out the outliers
+applications_filtered = applications %>%
+  filter(app_proc_time >= lower_bound & app_proc_time <= upper_bound)
+
+# Now, create the histogram with the filtered data
+ggplot(applications_filtered, aes(x = app_proc_time)) +
+  geom_histogram(binwidth = 50, fill = "lightblue") +
+  labs(title = "Histogram of Application Processing Time in Days (Without Outliers)",
+       x = "Processing Time (days)",
+       y = "Frequency") +
+  theme_minimal()
+
+```
+The histogram shows the distribution of USPTO application processing times, peaking around 1000 days.
+
+### Choose closeness as the cenrtality measure\
+Reason: 
+Examiners with high closeness centrality are typically better positioned to quickly receive and disseminate information across the network. This can lead to more efficient sharing of knowledge about patent laws, examination procedures, or technological advancements, potentially speeding up the examination process.\
+Closeness can facilitate easier collaboration among examiners. Those with higher centrality might find it easier to consult with colleagues, seek expert advice, or collaborate on complex cases, improving the quality and speed of patent examinations.
+
+```{r create the closeness column}
+
+library(igraph)
+edges_sample = read_csv("/Users/lauray/Documents/GitHub/2024-ona-assignments/Exercise 3/672_project_data/edges_sample.csv")
+edges_sample = drop_na(edges_sample)
+edges_sample = select(edges_sample, ego_examiner_id, alter_examiner_id)
+
+g = graph_from_data_frame(edges_sample, directed = FALSE)
+
+# Calculate closeness centrality
+closeness_centrality = closeness(g)
+centrality_df = data.frame(examiner_id = V(g)$name, closeness_centrality = closeness_centrality)
+applications = merge(applications, centrality_df, by.x = "examiner_id", by.y = "examiner_id", all.x = TRUE)
+
+# many examiners do not have centrality
+sum(is.na(applications$closeness_centrality))
+# filter out the NAs on centrality measure
+applications = drop_na(applications, closeness_centrality)
+# Use the sample due to the computing complexity
+set.seed(123)
+applications = sample_n(applications, 50000)
+attach(applications)
+```
+Columns may affect the model result:\
+1. Examiner Art Unit: This relates to the specific technology or subject matter area that the examiner specializes in. Different art units may have varying complexities or average processing times.\
+2. USPC Class:  Certain classes may inherently take longer to assess due to technical complexity or other factors.\
+3. Disposal Type: This indicates how an application was concluded (e.g., granted, abandoned). Different disposal types could be associated with different lengths of processing times.\
+4. Application Status Code: This reflects the current status of the application (e.g., pending, approved). The status could influence the processing time due to varying workflows and requirements at different stages.\
+5. TC (Technology Center): Each TC within the USPTO handles a broad area of technology and may have different workloads and processing speeds.\
+6. Gender: Gender may be included to explore demographic differences in processing times, which could reflect diverse work styles or systemic biases.\
+
+```{r Modelling - Feature}
+# "examiner_art_unit","uspc_class","disposal_type","appl_status_code", "tc", "gender", "closeness_centrality"
+
+# Subset the dataframe to include only the specified columns and y
+selected_columns <- c("examiner_art_unit", "uspc_class", "disposal_type","appl_status_code", "tc", "app_proc_time", "gender", "closeness_centrality")
+
+applications_subset <- applications %>%
+  select(all_of(selected_columns)) %>%
+  drop_na()
+
+# Convert categorical variables to dummy variables
+categorical_columns <- c("gender", "examiner_art_unit", "uspc_class", "disposal_type","appl_status_code", "tc")
+applications_subset_matrix <- applications_subset %>%
+  mutate(across(c(examiner_art_unit, uspc_class, disposal_type,appl_status_code, tc), factor)) %>%
+  model.matrix(~ . - app_proc_time - 1, data = .)
+applications_feature = as.data.frame(applications_subset_matrix)
+
+y <- applications_subset$app_proc_time
+
+set.seed(123) 
+lm_model <- lm(y~., data = applications_feature)
+options(max.print = 10000)
+summary(lm_model)
+
+```
+
+From the lm result: \
+The coefficient for closeness centrality is 3.4659 with a standard error of 35.3987. This result represents a very small and statistically insignificant association with application processing time (p-value = 0.922004). This analysis shows that an examiner's centrality does not have a significant impact on the time it takes to process patent applications.
+
+```{r Analyze the interaction between gender & closeness} 
+# set the formula
+formula_interaction <- as.formula("y ~ . + gendermale*closeness_centrality")
+set.seed(123)
+lm_model_interaction <- lm(formula_interaction, data = applications_feature)
+options(max.print = 10000)
+summary(lm_model_interaction)
+```
+From lm with interaction model:\
+
+The model is statistically significant overall (p-value < 2.2e-16), as shown by the F-statistic, but with a Multiple R-squared of 0.1883 and an Adjusted R-squared of 0.1781, it explains only a low proportion of the variance in processing times.\
+
+- closeness_centrality: The coefficient for closeness centrality has become significant (p-value = 0.025411) with a value of 152.0131, suggesting a positive relationship with processing times. This indicates that higher centrality within the examiner network is associated with longer processing times, a finding that contrasts with typical expectations and underscores the need for further investigation into how network dynamics influence workload and efficiency.\
+- gender:closeness_centrality: The interaction term between male gender and closeness centrality is notably significant (p-value = 0.010532), with a coefficient of -203.9068. This suggests that the effect of centrality on processing time is significantly modified by the examiner's gender. Specifically, increased centrality appears to lead to a larger reduction in processing times for male examiners than for their counterparts.
